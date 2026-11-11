@@ -7,6 +7,8 @@ import {
   EufySecurity,
   EufySecurityConfig,
   LogLevel,
+  Station,
+  StreamTimeoutOptions,
 } from "eufy-security-client";
 import { createRequire } from "module";
 
@@ -90,10 +92,45 @@ const args = program.opts();
     type: args.quiet ? "hidden" : "pretty",
     hideLogPositionForProduction: true,
   });
+  // Optional P2P stream timeouts (milliseconds), e.g. {"streamTimeouts": {"streamDataWait": 15000}}.
+  // eufy-security-client stops a livestream after `streamDataWait` ms without video
+  // (default 5000). Battery cameras behind a HomeBase can need longer to wake up.
+  // Not part of EufySecurityConfig, so it is removed before the driver sees the config.
+  const streamTimeouts: StreamTimeoutOptions | undefined = (
+    config as EufySecurityConfig & { streamTimeouts?: StreamTimeoutOptions }
+  ).streamTimeouts;
+  delete (config as { streamTimeouts?: StreamTimeoutOptions }).streamTimeouts;
+
   const driver: EufySecurity = await EufySecurity.initialize(
     config,
     logger.getSubLogger({ name: "eufy-security-client" }),
   );
+
+  if (streamTimeouts !== undefined) {
+    const applyStreamTimeouts = (station: Station): void => {
+      try {
+        station.setStreamTimeouts(streamTimeouts);
+        logger.info(
+          `Stream timeouts applied to station ${station.getSerial()}: ${JSON.stringify(streamTimeouts)}`,
+        );
+      } catch (error) {
+        logger.error(
+          `Failed to apply stream timeouts to station ${station.getSerial()}`,
+          error,
+        );
+      }
+    };
+    driver.on("station added", applyStreamTimeouts);
+    // The P2P session object lives as long as the Station, but re-apply on
+    // (re)connect anyway in case a future client version recreates it.
+    driver.on("station connect", applyStreamTimeouts);
+    driver
+      .getStations()
+      .then((stations: Station[]) => stations.forEach(applyStreamTimeouts))
+      .catch((error) =>
+        logger.error("Failed to apply stream timeouts to stations", error),
+      );
+  }
 
   let server: EufySecurityServer;
 
